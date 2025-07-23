@@ -1,0 +1,84 @@
+import json
+import csv
+import re
+import time
+from openai import OpenAI
+
+API_URL = "http://80.209.242.40:8000/v1"    # Конфигурация API
+API_KEY = "dummy-key"
+MODEL = "llama-3.3-70b-instruct"
+INPUT_JSON = "C:\\Users\\Alksq\\PycharmProjects\\PythonProject1\\patents_data.json"
+OUTPUT_CSV = "patent_parameters.csv"  # ОПРЕДЕЛЕНИЕ ВЫХОДНОГО ФАЙЛА
+RATE_LIMIT_DELAY = 0.02  # Задержка между запросами (50 запросов/сек)
+
+
+def extract_patent_id(url):
+    match = re.search(r'(?:patent/|/)([A-Z]{2}?\d+[A-Z]?\d*[A-Z]?)', url)
+    return match.group(1) if match else url.split("/")[-1]
+
+
+def extract_parameters(client, text):
+    prompt = f"""
+Проанализируй текст и извлеки указанные параметры. Если параметр отсутствует, верни 'N/A'. 
+Ответ предоставь ТОЛЬКО в формате JSON:
+
+{{
+  "IC50": "значение",
+  "Ki": "значение",
+  "Kd": "значение",
+  "Konn/Koff": "значение",
+  "LogP": "значение",
+  "Cmax": "значение",
+  "T1/2": "значение",
+  "Papp": "значение",
+  "CLint": "значение",
+  "target": "значение"
+}}
+
+Текст:
+{text}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+            temperature=0.1,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"Ошибка API: {str(e)}")
+        return {key: "API_ERROR" for key in [
+            "IC50", "Ki", "Kd", "Konn/Koff", "LogP",
+            "Cmax", "T1/2", "Papp", "CLint", "target"
+        ]}
+
+
+def main():
+    with open(INPUT_JSON, 'r', encoding='utf-8') as f:
+        patents = json.load(f)
+
+    client = OpenAI(base_url=API_URL, api_key=API_KEY)        # Настройка API клиента
+
+    with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = [
+            'patent_id', 'IC50', 'Ki', 'Kd', 'Konn/Koff',
+            'LogP', 'Cmax', 'T1/2', 'Papp', 'CLint', 'target'
+        ]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for patent in patents:      # Обработка каждого патента
+            patent_id = extract_patent_id(patent['patent_url'])
+            print(f"Обработка патента: {patent_id}")
+
+            params = extract_parameters(client, patent['patent_text'])
+            params['patent_id'] = patent_id
+
+            writer.writerow(params)
+            time.sleep(RATE_LIMIT_DELAY)  # Контроль частоты запросов
+
+
+if __name__ == "__main__":
+    main()
