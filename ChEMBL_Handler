@@ -7,29 +7,24 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-# Конфигурация
-DATA_DIR = "D:\\JUICY"
+DATA_DIR = "D:\\JUICY"      # Конфигурация
 os.makedirs(DATA_DIR, exist_ok=True)
 OUTPUT_PATH = os.path.join(DATA_DIR, "filtered_data.parquet")
 TEMP_DIR = os.path.join(DATA_DIR, "temp_processing")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Пути к файлам
-PATENTS_PATH = os.path.join(DATA_DIR, "patents.parquet")
+PATENTS_PATH = os.path.join(DATA_DIR, "patents.parquet")    # Пути к файлам
 MAPPING_PATH = os.path.join(DATA_DIR, "patent_compound_map.parquet")
 COMPOUNDS_PATH = os.path.join(DATA_DIR, "compounds.parquet")
 
-# Проверка файлов
-print("Проверка файлов...")
+print("Проверка файлов...")     # Проверка файлов
 for path in [PATENTS_PATH, MAPPING_PATH, COMPOUNDS_PATH]:
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Файл не найден: {path}")
+        raise FileNotFoundError(f"Файла нет: {path}")
     print(f"- {os.path.basename(path)}: {os.path.getsize(path) / 1024 / 1024:.2f} MB")
 
 
-# 1. Функция для потоковой фильтрации патентов
-def stream_patents_filter():
-    """Потоковая фильтрация патентов с сохранением на диск"""
+def stream_patents_filter():    # Функция для потоковой фильтрации патентов
     patents_file = pq.ParquetFile(PATENTS_PATH)
     output_path = os.path.join(TEMP_DIR, "filtered_patents.parquet")
     writer = None
@@ -68,9 +63,7 @@ def stream_patents_filter():
     return None
 
 
-# 2. Потоковая обработка связей
-def stream_mapping(patent_ids_path):
-    """Фильтрация связей по патентам с сохранением на диск"""
+def stream_mapping(patent_ids_path):   # Потоковая обработка связей
     patent_ids = set(pd.read_parquet(patent_ids_path)['patent_id'])
     mapping_file = pq.ParquetFile(MAPPING_PATH)
     output_path = os.path.join(TEMP_DIR, "filtered_mapping.parquet")
@@ -98,11 +91,7 @@ def stream_mapping(patent_ids_path):
         return output_path
     return None
 
-
-# 3. Исправленная потоковая обработка соединений (используем rdk_smiles)
-def stream_compounds(mapping_path):
-    """Фильтрация соединений по связям с использованием rdk_smiles"""
-    # Получаем уникальные compound_id
+def stream_compounds(mapping_path):    # Потоковая обработка соединений, используем rdk_smiles
     compound_ids = set()
     mapping_file = pq.ParquetFile(mapping_path)
 
@@ -112,12 +101,10 @@ def stream_compounds(mapping_path):
         del df
         gc.collect()
 
-    # Проверяем схему файла compounds
-    compounds_file = pq.ParquetFile(COMPOUNDS_PATH)
+    compounds_file = pq.ParquetFile(COMPOUNDS_PATH)      # Проверяем схему файла compounds
     schema_names = compounds_file.schema.names
 
-    # Используем rdk_smiles вместо smiles
-    col_map = {}
+    col_map = {}       # Используем rdk_smiles
     for col in ['id', 'rdk_smiles']:
         matches = [name for name in schema_names if name.lower() == col.lower()]
         if matches:
@@ -125,16 +112,14 @@ def stream_compounds(mapping_path):
         else:
             raise KeyError(f"Колонка '{col}' не найдена в файле compounds.parquet. Доступные колонки: {schema_names}")
 
-    # Фильтрация соединений
-    output_path = os.path.join(TEMP_DIR, "filtered_compounds.parquet")
+    output_path = os.path.join(TEMP_DIR, "filtered_compounds.parquet")      # Фильтрация соединений
     writer = None
 
     for i in tqdm(range(compounds_file.num_row_groups), desc="Фильтрация соединений"):
         table = compounds_file.read_row_group(i)
         df = table.to_pandas()
 
-        # Применяем маппинг колонок
-        df_filtered = df.rename(columns={
+        df_filtered = df.rename(columns={            # Применяем маппинг колонок
             col_map['id']: 'compound_id',
             col_map['rdk_smiles']: 'smiles'  # Сохраняем как smiles для единообразия
         })
@@ -157,14 +142,12 @@ def stream_compounds(mapping_path):
     return None
 
 
-# 4. Финальное объединение с преобразованием типов
-def merge_results(patents_path, mapping_path, compounds_path):
+def merge_results(patents_path, mapping_path, compounds_path):   # Финальное объединение с преобразованием типов
     """Объединение результатов с потоковой обработкой"""
     patents_iter = pq.ParquetFile(patents_path).iter_batches()
     mapping_iter = pq.ParquetFile(mapping_path).iter_batches()
 
-    # Читаем соединения с преобразованием типа SMILES
-    compounds_df = pd.read_parquet(compounds_path)
+    compounds_df = pd.read_parquet(compounds_path)        # Читаем соединения с преобразованием типа SMILES
     compounds_df['smiles'] = compounds_df['smiles'].astype(str)
 
     writer = pq.ParquetWriter(OUTPUT_PATH, pa.schema([
@@ -175,32 +158,25 @@ def merge_results(patents_path, mapping_path, compounds_path):
 
     for patents_batch in tqdm(patents_iter, desc="Объединение данных"):
         patents_df = patents_batch.to_pandas()
-
-        # Преобразуем patent_id в строку
-        patents_df['patent_id'] = patents_df['patent_id'].astype(str)
+        patents_df['patent_id'] = patents_df['patent_id'].astype(str)          # Преобразуем patent_id в строку
         patent_ids = set(patents_df['patent_id'])
-
         mapping_batch = next(mapping_iter, None)
+
         if mapping_batch is None:
             break
 
         mapping_df = mapping_batch.to_pandas()
-
-        # Преобразуем patent_id в строку
-        mapping_df['patent_id'] = mapping_df['patent_id'].astype(str)
+        mapping_df['patent_id'] = mapping_df['patent_id'].astype(str)            # Преобразуем patent_id в строку
         mapping_df = mapping_df[mapping_df['patent_id'].isin(patent_ids)]
 
         if mapping_df.empty:
             continue
 
-        # Преобразуем compound_id в int32
-        mapping_df['compound_id'] = mapping_df['compound_id'].astype('int32')
+        mapping_df['compound_id'] = mapping_df['compound_id'].astype('int32')           # Преобразуем compound_id в int32
 
         merged = mapping_df.merge(compounds_df, on='compound_id')
         result = patents_df.merge(merged, on='patent_id')[['patent_id', 'compound_id', 'smiles']]
-
-        # Дополнительное преобразование типов на всякий случай
-        result['patent_id'] = result['patent_id'].astype(str)
+        result['patent_id'] = result['patent_id'].astype(str)            # Дополнительное преобразование типов на всякий случай
         result['compound_id'] = result['compound_id'].astype('int32')
         result['smiles'] = result['smiles'].astype(str)
 
@@ -211,13 +187,12 @@ def merge_results(patents_path, mapping_path, compounds_path):
     writer.close()
 
 
-# Основной процесс
-try:
+try:                             # Основной процесс
     start_time = time.time()
 
     patents_path = stream_patents_filter()
     if not patents_path:
-        raise ValueError("Не найдено патентов после фильтрации!")
+        raise ValueError("Не найдено патентов после фильтрации!!")
 
     mapping_path = stream_mapping(patents_path)
     if not mapping_path:
@@ -230,8 +205,8 @@ try:
     merge_results(patents_path, mapping_path, compounds_path)
 
     result_file = pq.ParquetFile(OUTPUT_PATH)
-    print(f"\n✅ Обработка завершена! Результат сохранен в {OUTPUT_PATH}")
-    print(f"Общее количество записей: {result_file.metadata.num_rows}")
+    print(f"\n✅ Обработка завершена, Результат сохранен в {OUTPUT_PATH}")
+    print(f"Количество записей: {result_file.metadata.num_rows}")
 
     sample = result_file.read_row_group(0).to_pandas().head(3)
     print("\nПример данных:")
@@ -241,7 +216,7 @@ try:
     print(f"\nОбщее время выполнения: {duration // 60:.0f} мин {duration % 60:.0f} сек")
 
 except Exception as e:
-    print(f"\n❌ Ошибка: {str(e)}")
+    print(f"\n Ошибка: {str(e)}")
     import traceback
 
     traceback.print_exc()
