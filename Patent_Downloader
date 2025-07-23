@@ -1,0 +1,197 @@
+import json
+import time
+import logging
+from tqdm import tqdm
+import requests
+import re
+import os
+import math
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("gemini_patent_search.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger()
+
+# Конфигурация
+INPUT_JSON = "C:\\Users\\Alksq\\Downloads\\Telegram Desktop\\chembl_results (3).json"
+OUTPUT_JSON = "patents_data.json"
+GEMINI_API_KEY = "AIzaSyDFOA6TJefPai196MD2LD0EFwzaWNxDLms"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
+MAX_SUBSTANCES = 30  # Уменьшено для тестирования
+DELAY_BASE = 30  # Увеличенная задержка для более мощной модели
+MAX_RETRIES = 3  # Уменьшено количество попыток
+QUOTA_DELAY = 180  # Увеличенная задержка при превышении квоты (3 минуты)
+MIN_TEXT_LENGTH = 100  # Минимальная длина текста патента
+
+
+def search_patents_with_gemini(substance, attempt=1):
+    """Ищет патенты для одного вещества с помощью Gemini API"""
+    name = substance["name"]
+    prompt = f"""
+Найди полный текст патента на Google Patents, связанного с химическим веществом: {name}.
+Предоставь ответ в формате JSON со следующими ключами:
+- "substance_name": "{name}"
+- "patent_text": Числа которые обозначают фармакологические параметры, также запиши какое число за какой параметр отвечает (IC50, Ki, Kd, Konn/Koff, LogP, Cmax, T1/2, Papp, CLint, мишень (target protein если есть, если нет, то просто мишень) - их ищи на сайте PubChem, NCBI и в других научных базах.
+- "patent_url": URL наиболее релевантного патента, который содержит наибольшее количество данных относительно фармакологических параметров (или "N/A" если не найден)
+
+Если патент не найден, установи "patent_url" и "patent_text" в "N/A".
+Важно: ответ должен быть только в формате JSON, без дополнительного текста.
+    """
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-goog-api-key": GEMINI_API_KEY
+    }
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": 8192
+        }
+    }
+
+    try:
+        logger.info(f"Запрос к Gemini для {name} (попытка {attempt})")
+        response = requests.post(
+            GEMINI_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=180
+        )
+
+        # Обработка ошибки 429 (Too Many Requests)
+        if response.status_code == 429:
+            logger.warning(f"Превышена квота запросов для {name}. Ожидание {QUOTA_DELAY} секунд...")
+            time.sleep(QUOTA_DELAY)
+            # Повторяем только для ошибки 429
+            return search_patents_with_gemini(substance, attempt + 1)
+
+        if response.status_code >= 400:
+            error_msg = f"Ошибка {response.status_code} для {name}: {response.text[:200]}"
+            logger.error(error_msg)
+            return {
+                "substance_name": name,
+                "patent_url": f"ERROR_{response.status_code}",
+                "patent_text": error_msg
+            }
+
+        response_data = response.json()
+
+        # Извлекаем JSON-ответ
+        if "candidates" in response_data and response_data["candidates"]:
+            json_text = response_data["candidates"][0]["content"]["parts"][0]["text"]
+
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError:
+                json_match = re.search(r'\{.*\}', json_text, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group(0))
+                else:
+                    logger.error(f"Не удалось извлечь JSON из ответа для {name}")
+                    return {
+                        "substance_name": name,
+                        "patent_url": "PARSE_ERROR",
+                        "patent_text": json_text[:1000]
+                    }
+        else:
+            logger.error(f"Пустой ответ от Gemini для {name}")
+            return {
+                "substance_name": name,
+                "patent_url": "EMPTY_RESPONSE",
+                "patent_text": "Пустой ответ от API"
+            }
+
+    except Exception as e:
+        logger.error(f"Ошибка при запросе для {name}: {str(e)}")
+        return {
+            "substance_name": name,
+            "patent_url": "EXCEPTION",
+            "patent_text": str(e)
+        }
+
+
+def process_substances():
+    """Обрабатывает вещества по одному и сохраняет только вещества с найденными патентами"""
+    try:
+        with open(INPUT_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки JSON: {str(e)}")
+        return
+
+    # Извлечение первых MAX_SUBSTANCES веществ
+    substances = []
+    for item in data:
+        if "molecules" in item:
+            for molecule in item["molecules"]:
+                name = molecule.get("pref_name", "")
+                if name:
+                    substances.append({
+                        "name": name,
+                        "chembl_id": molecule.get("molecule_chembl_id", "UNKNOWN"),
+                    })
+                if len(substances) >= MAX_SUBSTANCES:
+                    break
+        if len(substances) >= MAX_SUBSTANCES:
+            break
+
+    logger.info(f"Найдено {len(substances)} веществ для обработки")
+
+    # Результаты
+    results = []
+    valid_count = 0
+
+    # Обработка веществ
+    for i, substance in enumerate(tqdm(substances, desc="Обработка веществ")):
+        name = substance["name"]
+        logger.info(f"Обработка {i + 1}/{len(substances)}: {name}")
+
+        # Первый запрос
+        patent_data = search_patents_with_gemini(substance, 1)
+
+        # Проверяем результат
+        patent_url = patent_data.get("patent_url", "")
+        patent_text = patent_data.get("patent_text", "")
+
+        # Если нет текста патента - пропускаем
+        if ("N/A" in patent_url or
+                "N/A" in patent_text or
+                len(patent_text) < MIN_TEXT_LENGTH or
+                "ERROR" in patent_url):
+            logger.info(f"Патент для {name} не найден, пропускаем")
+            continue
+
+        # Если получен текст патента - сохраняем
+        result = {
+            "substance_name": name,
+            "chembl_id": substance["chembl_id"],
+            "patent_url": patent_url,
+            "patent_text": patent_text
+        }
+        results.append(result)
+        valid_count += 1
+
+        # Сохранение результатов после каждого вещества
+        try:
+            with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            logger.info(f"Результат для {name} сохранен")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения: {str(e)}")
+
+        # Задержка между запросами
+        time.sleep(DELAY_BASE)
+
+    logger.info(f"Обработка завершена! Найдено {valid_count} патентов из {len(substances)} веществ")
+
+
+if __name__ == "__main__":
+    process_substances()
