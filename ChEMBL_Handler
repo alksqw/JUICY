@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-DATA_DIR = "D:\\JUICY"      # Конфигурация
+DATA_DIR = "D:\\JUICY" 
 os.makedirs(DATA_DIR, exist_ok=True)
 OUTPUT_PATH = os.path.join(DATA_DIR, "filtered_data.parquet")
 TEMP_DIR = os.path.join(DATA_DIR, "temp_processing")
